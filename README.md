@@ -299,15 +299,16 @@ At the very end it also says
 > unsafe after a fork() unless explicitly documented to be safe or async-signal
 > safe.
 
-The term "[async-signal safe](https://man7.org/linux/man-pages/man7/signal-safety.7.html)"
-is kind of jargony, but almost nothing library is safe, not even `printf(3)`.
-See `signal-safety(7)` for the list.  The approved use of fork is to exec,
-which is what clears the process state to something known-good.  The modern
-`posix_spawn(2)` is just that without being a footgun.
+The term "async-signal safe" is kind of jargony, but almost nothing library is
+safe, not even `printf(3)`.  See
+[`signal-safety(7)`](https://man7.org/linux/man-pages/man7/signal-safety.7.html)
+for the list.  The approved use of fork is to exec, which is what clears the
+process state to something known-good.  The modern `posix_spawn(2)` is just
+that without being a footgun.
 
-The Python [`os.fork` docs](https://docs.python.org/3/library/os.html#os.fork) also now state:
+The Python [`os.fork()` docs](https://docs.python.org/3/library/os.html#os.fork) also now state:
 
-> We chose to surface [multiple threads existing when you call os.fork] as a
+> We chose to surface [multiple threads existing when you call os.fork()] as a
 > warning, when detectable, to better inform developers of a design problem
 > that the POSIX platform specifically notes as not supported. Even in code
 > that appears to work, it has never been safe to mix threading with os.fork()
@@ -344,8 +345,9 @@ cases, remove their usage of `fork`), so this will take some time to become
 viable.  Scientific libs like `numpy` and `scipy` already support it, but as of
 Oct 2024 the popular `cryptography` project fails to even build on it.
 
-As long as one fork remains, we still have this problem.  That's why the
-default on OS X change to `spawn` (to make using `fork` at least opt-in), and I
-personally hope that the default is changed on Linux as well.  Well-behaved
-projects like [trailrunner already use spawn](https://github.com/omnilib/trailrunner/blob/d5350ee6b33a6dbd10b47ac8fe7cb044b599a5f5/trailrunner/core.py#L143)
+As long as one `fork(2)` or `os.fork()` or `mp.set_start_method("fork")` or
+`mp.get_context("fork")` remains, we can still have this problem.  That's why
+the default on OS X changed to `spawn` (to make using `fork` at least opt-in),
+and I personally hope that the default is changed on Linux as well.
+Well-behaved projects like [trailrunner already use spawn](https://github.com/omnilib/trailrunner/blob/d5350ee6b33a6dbd10b47ac8fe7cb044b599a5f5/trailrunner/core.py#L143)
 because it provides consistent cross-platform behavior [learned the hard way](https://github.com/facebookincubator/Bowler/issues/52).
