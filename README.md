@@ -305,7 +305,7 @@ See `signal-safety(7)` for the list.  The approved use of fork is to exec,
 which is what clears the process state to something known-good.  The modern
 `posix_spawn(2)` is just that without being a footgun.
 
-The Python [os.fork](https://docs.python.org/3/library/os.html#os.fork) docs also now state:
+The Python [`os.fork` docs](https://docs.python.org/3/library/os.html#os.fork) also now state:
 
 > We chose to surface [multiple threads existing when you call os.fork] as a
 > warning, when detectable, to better inform developers of a design problem
@@ -335,9 +335,17 @@ to rewrite these to use top-level functions along with explicit currying
 
 ## Forward-looking Solutions
 
-There is a somewhat experimental `nogil` Python interpreter which hopefully
-will stabilize and be widely adopted starting in 2025 which allows you to get
-multicore parallelism when using threads, making all of this fork/spawn
-business unnecessary.  That's going to be some work for a lot of third-party
-library authors in particular, but is a breath of clean air and the better way
-forward.  As long as anyone forks, we can still have problems.
+Since 3.13 (Oct 2024) there is a functional `nogil` interpreter available
+upstream, which allows you to get full concurrency using interpreter threads
+without arbitrary limits.
+
+This is an ABI change, so native code needs to be recompiled (and in some
+cases, remove their usage of `fork`), so this will take some time to become
+viable.  Scientific libs like `numpy` and `scipy` already support it, but as of
+Oct 2024 the popular `cryptography` project fails to even build on it.
+
+As long as one fork remains, we still have this problem.  That's why the
+default on OS X change to `spawn` (to make using `fork` at least opt-in), and I
+personally hope that the default is changed on Linux as well.  Well-behaved
+projects like [trailrunner already use spawn](https://github.com/omnilib/trailrunner/blob/d5350ee6b33a6dbd10b47ac8fe7cb044b599a5f5/trailrunner/core.py#L143)
+because it provides consistent cross-platform behavior [learned the hard way](https://github.com/facebookincubator/Bowler/issues/52).
