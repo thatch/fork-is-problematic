@@ -98,14 +98,15 @@ child 59022
 child 59023
 ```
 
-While `libc` does have a concept of `atexit` hooks, `pthreads` does, and its
-`pthread_atfork(3)` is standardized.  Note that Python `atfork` hooks are not
-called if a C lbirary calls `fork(2)` directly, just as `atexit` hooks don't
-when you bypass the library function and use `_exit(2)`).
+While `libc` does have a concept of `atexit` hooks, it does not have one for
+`atfork` and we have to use `pthread_atfork(3)` for that.  At least it's part
+of POSIX.  Note that Python `atfork` hooks [are not called if a C library calls `fork(2)` directly](https://docs.python.org/3/c-api/init.html#cautions-about-fork),
+just as `atexit` hooks don't get called when you bypass the library function
+and use `_exit(2)`).
 
 `pthread_atfork(3)` includes this gem:
 
-> In practice, th[e] task [of setting up good state after a fork] is generally
+> In practice, [the task of setting up good state after a fork] is generally
 > too difficult to be practicable.
 
 A common workaround is to store the expected `pid` in a global variable, and
@@ -142,9 +143,10 @@ Trust me that one of the threads was outputting (thus, held the lock) when the
 fork happened if it hangs.
 
 Thus, the only safe state for locks during a fork is either unlocked, or locked
-(by an atfork hook directly).  But you can't just free all locks when you fork,
-and neither can you realistically acquire "all" locks, fork, then release them
-even if you had a hook to let you run that code.
+(by an atfork hook directly, as the Python [c-api does for its own locks](https://docs.python.org/3/c-api/init.html#cautions-about-fork)).
+You can't just free all locks when you fork, and neither can you realistically
+acquire "all" locks in a real application, fork, then release them even if you
+had a reliable hook to let you run that code.
 
 If you use buffered I/O, the time spent under the lock is less (so the
 likelihood of deadlock is less), but it still outputs duplicate entries just as
