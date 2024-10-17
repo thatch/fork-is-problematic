@@ -25,7 +25,10 @@ Basically, because this is the way some old Unix vendors implemented this in
 the 70's.  It got codified into POSIX and Linux (as well as OS X) obey that.
 
 If you'd like to follow along, open a Terminal and run `make` in the root of
-this repo.
+this repo.  The docs for mentions like `fork(2)` can be loaded by running `man
+2 fork` to make sure you get the right section, which is displayed in the
+upper-left of the viewer.  The Linux version of the man pages are [also
+available online](https://man7.org/linux/man-pages/man2/fork.2.html).
 
 ## Problem 1: Global state
 
@@ -95,10 +98,15 @@ child 59022
 child 59023
 ```
 
-While `libc` does have a concept of `atexit` hooks, it does not have one of
-`atfork` -- Python does when you call `os.fork` but these don't get run if a C
-library calls `fork(2)` directly (just as `atexit` hooks don't when you bypass
-the library function and use `_exit(2)`).
+While `libc` does have a concept of `atexit` hooks, `pthreads` does, and its
+`pthread_atfork(3)` is standardized.  Note that Python `atfork` hooks are not
+called if a C lbirary calls `fork(2)` directly, just as `atexit` hooks don't
+when you bypass the library function and use `_exit(2)`).
+
+`pthread_atfork(3)` includes this gem:
+
+> In practice, th[e] task [of setting up good state after a fork] is generally
+> too difficult to be practicable.
 
 A common workaround is to store the expected `pid` in a global variable, and
 call `getpid()` periodically to recognize if you've forked.  This is expensive,
@@ -213,14 +221,44 @@ mismatched replies).
 
 ## Problem 6: Why isn't this a problem in Java?
 
-Because they don't use fork (as much).  There might be some JNI library that
-forks, but that would result in the same "all bets are off" problems we talk
-about here, so people don't do it.
+Because they don't use fork, because they don't need to.  The threading model
+is already concurrent, unlike Python's, and the runtime doesn't even expose how
+to fork without using JNI (which should give you pause about whether it's a
+good idea for your Java code).
+
+I can't find a single page on the Internet that says "here's how you would"
+because it's so weird, and in the words of [Paul Bakker](https://x.com/pbakker)
+is "so uncommon, I've never done it even once in my career."
+
+I queried Google for "java jni fork" to try to find some references, and the
+summary does a pretty good job at capturing the scariness combined with "but,
+why" (incidentally, also using the word "problematic"):
+
+> Using fork() directly from JNI code can be problematic due to the way the JVM
+> manages its internal state. However, if you absolutely need this
+> functionality, here's a general approach:
+>
+> Important Considerations:
+> * JVM State: Forking a process duplicates the entire memory space of the parent
+>   process, including the JVM's internal state. This can lead to unpredictable
+>   behavior and crashes.
+> * Synchronization: The child process will inherit ... from the parent
+>   process, which can lead to synchronization issues and deadlocks.
+> * Portability: Forking is not supported on all platforms (e.g., Windows).
+>
+> ...
+>
+> Caution:
+> * This approach should be used with extreme caution. It is generally not
+>   recommended for production environments due to the potential for instability.
+> * Consider carefully whether you truly need to use fork() in this context.
+
+## Problem 7: When is this a problem in Python?
 
 Python libraries do use multiprocessing to get CPU-bound workloads to
-parallelize -- they wouldn't otherwise because of the GIL.  That said, there
-are actually three backends that multiprocessing can use, in decreasing order
-of priority and well-definedness:
+parallelize -- they wouldn't use more than one core otherwise because of the
+GIL.  That said, there are actually three backends that multiprocessing can
+use, best and most well-defined first:
 
 1. `spawn` which uses the `posix_spawn(2)` syscall which does a fork+exec and
 carries basically no state from the parent.  As an implementation detail, the
@@ -230,12 +268,13 @@ protocol.
 2. `forkserver` when started early enough first forks a boring enough child
 that global state (like using grpc in the parent) hasn't happened yet.  When
 the parent needs another child, it talks to the `forkserver` process which
-creates a grandchild that inherits the boring state.  As mentioned above, using
+creates a grandchild that inherits the boring state.  Python still communicates
+with the grandchild over a pickle-based protocol.  As mentioned above, using
 grpc in either the parent or the child is safe-ish, and this is a way you can
 do both.
 3. `fork` evokes all the problems mentioned here.
 
-## Problem 7: Why isn't this documented?
+## Problem 8: Why isn't this documented?
 
 It totally is, although the language might not be scary enough to make this obvious:
 
@@ -258,10 +297,11 @@ At the very end it also says
 > unsafe after a fork() unless explicitly documented to be safe or async-signal
 > safe.
 
-The term "async-signal safe" is kind of jargony, but almost nothing is safe,
-not even `printf(3)`.  The approved use of fork is to exec, which is what
-clears state.  The modern `posix_spawn(2)` is just that without being a
-footgun.
+The term "[async-signal safe](https://man7.org/linux/man-pages/man7/signal-safety.7.html)"
+is kind of jargony, but almost nothing library is safe, not even `printf(3)`.
+See `signal-safety(7)` for the list.  The approved use of fork is to exec,
+which is what clears the process state to something known-good.  The modern
+`posix_spawn(2)` is just that without being a footgun.
 
 The Python [os.fork](https://docs.python.org/3/library/os.html#os.fork) docs also now state:
 
@@ -280,7 +320,9 @@ The Python [os.fork](https://docs.python.org/3/library/os.html#os.fork) docs als
 ## Solutions
 
 Parallelism is properly supported in Python when using threads (as long as
-you're I/O-bound, not CPU-bound), or spawn, and in a pinch, forkserver.
+you're I/O-bound, not CPU-bound), or `mp.get_context("spawn")` (the default on
+OS X and the only option on Windows), and in a pinch,
+`mp.get_context("forkserver")` (but only on Linux -- this isn't the future).
 
 Those represent two extremes of what gets shared -- in threads, you can
 directly refer to objects that can't (easily) be recreated, while in spawn or
