@@ -30,6 +30,142 @@ this repo.  The docs for mentions like `fork(2)` can be loaded by running `man
 upper-left of the viewer.  The Linux version of the man pages are [also
 available online](https://man7.org/linux/man-pages/man2/fork.2.html).
 
+
+## Potential trigger 0: Choice of language?
+
+### This can be a problem in Python
+
+Python libraries use multiprocessing to get CPU-bound workloads to
+parallelize -- they wouldn't use more than one core otherwise because of the
+GIL.  That said, there are actually three backends that multiprocessing can
+use, best and most well-defined first:
+
+1. `spawn` which uses the `posix_spawn(2)` syscall which does a fork+exec and
+carries basically no state from the parent.  As an implementation detail, the
+command line is customizable, and file desciptors can be deliberately
+inherited, which is how Python communicates with a child over a pickle-based
+protocol.
+2. `forkserver` when started early enough first forks a boring enough child
+that global state (like using grpc in the parent) hasn't happened yet.  When
+the parent needs another child, it talks to the `forkserver` process which
+creates a grandchild that inherits the boring state.  Python still communicates
+with the grandchild over a pickle-based protocol.  As mentioned above, using
+grpc in either the parent or the child is safe-ish, and this is a way you can
+do both.
+3. `fork` has some general compatibility problems when combined with threads or
+internal state like buffers or locks, in any language, not just Python.  The
+remainder of this section gives simple Python examples, the following one talks
+about Java, and the remainder is in straightforward C.  This is simply threads
+and processes not getting along, except in very narrow cases (you immediately
+exec).
+
+This code maybe works because there aren't other threads (that we know about):
+
+```sh
+$ python 0.py
+About to fork, locked= False
+got lock 84901
+got lock 84902
+```
+
+While this code has a 10% chance of deadlock (fairly precisely, when it's
+locked as we go into the fork):
+
+```
+$ python 0b.py
+About to fork, locked= True
+got lock 84962
+<hang>
+```
+
+Additionally, if you run that on 3.12+ you get a warning that threads are
+involved and it can deadlock.  That's fully accurate.
+
+```
+$ python3.12 0b.py
+About to fork, locked= True
+/Users/timhatch/code/fork-is-problematic/0b.py:18: DeprecationWarning: This process (pid=85040) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  rv = os.fork()
+got lock 85040
+<hang>
+```
+
+With spawn, no state is really inherited in the child, so connection pooling
+doesn't cause problems (each child has its own connection pool, note different
+ephemeral ports):
+
+```
+$ python 0c.py
+Fetching with <socket.socket fd=3, family=2, type=1, proto=0, laddr=('172.24.10.37', 51984), raddr=('172.217.12.110', 80)>
+Read b'HTTP/' 127
+Fetching with <socket.socket fd=3, family=2, type=1, proto=0, laddr=('172.24.10.37', 51984), raddr=('172.217.12.110', 80)>
+Read b'HTTP/' 127
+Fetching with <socket.socket fd=7, family=2, type=1, proto=0, laddr=('172.24.10.37', 51985), raddr=('172.217.12.110', 80)>
+Fetching with <socket.socket fd=7, family=2, type=1, proto=0, laddr=('172.24.10.37', 51986), raddr=('172.217.12.110', 80)>
+Fetching with <socket.socket fd=7, family=2, type=1, proto=0, laddr=('172.24.10.37', 51987), raddr=('172.217.12.110', 80)>
+Read b'HTTP/' 127
+Read b'HTTP/' 127
+Read b'HTTP/' 127
+```
+
+But with fork, the already-open file descriptor is shared, and the responses get
+interleaved/merged on this pipeline-enabled, pooled connection:
+
+```
+$ python 0d.py
+Fetching with <socket.socket fd=3, family=2, type=1, proto=0, laddr=('172.24.10.37', 51981), raddr=('172.217.12.110', 80)>
+Read b'HTTP/' 127
+Fetching with <socket.socket fd=3, family=2, type=1, proto=0, laddr=('172.24.10.37', 51981), raddr=('172.217.12.110', 80)>
+Read b'HTTP/' 127
+Fetching with <socket.socket fd=3, family=2, type=1, proto=0, laddr=('172.24.10.37', 51981), raddr=('172.217.12.110', 80)>
+Fetching with <socket.socket fd=3, family=2, type=1, proto=0, laddr=('172.24.10.37', 51981), raddr=('172.217.12.110', 80)>
+Fetching with <socket.socket fd=3, family=2, type=1, proto=0, laddr=('172.24.10.37', 51981), raddr=('172.217.12.110', 80)>
+Read b'HTTP/' 127
+Read b'HTTP/' 130
+Read b'P/1.1' 124
+```
+
+For a prefix- or line-oriented protocol (like
+[websockets](https://datatracker.ietf.org/doc/html/rfc6455#section-5.2) when
+not masking, or plaintext HTTP 1.1), you might just receive a different valid
+response not intended for you.  With more binary protocols (like anything over
+TLS) you are likely to encounter low-level "data corruption" type exceptions
+that are unpredictable.
+
+### Why isn't this a problem in Java?
+
+Because they don't use fork, because they don't need to.  The threading model
+is already concurrent, unlike Python's, and the runtime doesn't even expose how
+to fork without using JNI (which should give you pause about whether it's a
+good idea for your Java code).
+
+I can't find a single page on the Internet that says "here's how you would"
+because it's so weird, and in the words of [Paul Bakker](https://x.com/pbakker)
+is "so uncommon, I've never done it even once in my career."
+
+I queried Google for "java jni fork" to try to find some references, and the
+summary does a pretty good job at capturing the scariness combined with "but,
+why" (incidentally, also using the word "problematic"):
+
+> Using fork() directly from JNI code can be problematic due to the way the JVM
+> manages its internal state. However, if you absolutely need this
+> functionality, here's a general approach:
+>
+> Important Considerations:
+> * JVM State: Forking a process duplicates the entire memory space of the parent
+>   process, including the JVM's internal state. This can lead to unpredictable
+>   behavior and crashes.
+> * Synchronization: The child process will inherit ... from the parent
+>   process, which can lead to synchronization issues and deadlocks.
+> * Portability: Forking is not supported on all platforms (e.g., Windows).
+>
+> ...
+>
+> Caution:
+> * This approach should be used with extreme caution. It is generally not
+>   recommended for production environments due to the potential for instability.
+> * Consider carefully whether you truly need to use fork() in this context.
+
 ## Problem 1: Global state
 
 Quite often, I/O is buffered.  What this means is that your call to `printf(3)`
@@ -221,62 +357,7 @@ could get a (different) second request sent from two different children, with
 different encryption state (resulting in confusing errors, rather than just
 mismatched replies).
 
-## Problem 6: Why isn't this a problem in Java?
-
-Because they don't use fork, because they don't need to.  The threading model
-is already concurrent, unlike Python's, and the runtime doesn't even expose how
-to fork without using JNI (which should give you pause about whether it's a
-good idea for your Java code).
-
-I can't find a single page on the Internet that says "here's how you would"
-because it's so weird, and in the words of [Paul Bakker](https://x.com/pbakker)
-is "so uncommon, I've never done it even once in my career."
-
-I queried Google for "java jni fork" to try to find some references, and the
-summary does a pretty good job at capturing the scariness combined with "but,
-why" (incidentally, also using the word "problematic"):
-
-> Using fork() directly from JNI code can be problematic due to the way the JVM
-> manages its internal state. However, if you absolutely need this
-> functionality, here's a general approach:
->
-> Important Considerations:
-> * JVM State: Forking a process duplicates the entire memory space of the parent
->   process, including the JVM's internal state. This can lead to unpredictable
->   behavior and crashes.
-> * Synchronization: The child process will inherit ... from the parent
->   process, which can lead to synchronization issues and deadlocks.
-> * Portability: Forking is not supported on all platforms (e.g., Windows).
->
-> ...
->
-> Caution:
-> * This approach should be used with extreme caution. It is generally not
->   recommended for production environments due to the potential for instability.
-> * Consider carefully whether you truly need to use fork() in this context.
-
-## Problem 7: When is this a problem in Python?
-
-Python libraries do use multiprocessing to get CPU-bound workloads to
-parallelize -- they wouldn't use more than one core otherwise because of the
-GIL.  That said, there are actually three backends that multiprocessing can
-use, best and most well-defined first:
-
-1. `spawn` which uses the `posix_spawn(2)` syscall which does a fork+exec and
-carries basically no state from the parent.  As an implementation detail, the
-command line is customizable, and file desciptors can be deliberately
-inherited, which is how Python communicates with a child over a pickle-based
-protocol.
-2. `forkserver` when started early enough first forks a boring enough child
-that global state (like using grpc in the parent) hasn't happened yet.  When
-the parent needs another child, it talks to the `forkserver` process which
-creates a grandchild that inherits the boring state.  Python still communicates
-with the grandchild over a pickle-based protocol.  As mentioned above, using
-grpc in either the parent or the child is safe-ish, and this is a way you can
-do both.
-3. `fork` evokes all the problems mentioned here.
-
-## Problem 8: Why isn't this documented?
+## Problem 6: Why isn't this documented?
 
 It totally is, although the language might not be scary enough to make this obvious:
 
